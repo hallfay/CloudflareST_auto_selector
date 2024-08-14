@@ -13,7 +13,26 @@ import socket
 for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
     os.environ.pop(key, None)
 
-# ... (rest of the code remains the same until the fetch_ips function)
+def is_valid_ipv4(ip): 
+    """检查一个字符串是否是有效的IPv4地址"""
+    pattern = re.compile(r'^(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$')
+    return bool(pattern.match(ip))
+
+def get_previously_selected_ips():
+    with open("./config/config.json", "r", encoding="utf-8") as config:
+        domains = json.load(config).get("domains")
+        ip_list = []
+        for key in domains:
+            ip = socket.gethostbyname(key)
+            ip_list.append(ip)
+        print("上一次优选的ip已添加到此次优选")
+        return ip_list
+    
+def get_fixed_ips():
+    with open("./config/fixed_ips.txt", "r", encoding="utf-8") as file:
+        ip_list = [ip.strip() for ip in file.readlines()]
+        ip_list = filter(is_valid_ipv4, ip_list)
+        return list(ip_list)
 
 def fetch_ips():
     print("下载并生成第三方中转IP列表...")
@@ -55,8 +74,6 @@ def fetch_ips():
 
     print("此次优选IP已保存到3ip.txt")
 
-# ... (rest of the code remains the same)
-
 def run_cloudflare_speedtest():
     print("测速并生成result.csv...")
     with open('./config/cmd.txt', 'r') as file:
@@ -66,10 +83,17 @@ def run_cloudflare_speedtest():
 
     print("测速完成，生成result.csv文件")
 
-# ... (rest of the code remains the same)
+def get_ips():
+    ips = []
+    with open("result.csv", "r", encoding="utf-8") as csvfile:
+        csvreader = csv.reader(csvfile)
+        next(csvreader)  # skip header
+        for row in csvreader:
+            ips.append(row[0])
+    return ips
 
 def load_config():
-    with open("config/config.json", "r", encoding="utf-8") as file:
+    with open("./config/config.json", "r", encoding="utf-8") as file:
         config = json.load(file)
         email = config.get("email")
         global_api_key = config.get("global_api_key")
@@ -80,9 +104,53 @@ def load_config():
             exit()
     return email, global_api_key, zone_id, domains
 
-# ... (rest of the code remains the same)
+def update_cloudflare_dns(email, global_api_key, zone_id, domains):
+    print("更新Cloudflare DNS记录...")
+    ips = get_ips()
+    if len(ips) > 20:
+        return domains
+    res_domains = domains.copy()
+    for idx, (domain, record_id) in enumerate(domains.items()):
+        if idx >= len(ips):
+            print(f"可用ip数量不足，截至域名: {domain}")
+            break
 
-if __name__=="__main__":
+        ip = ips[idx]
+        print(f"Processing Domain[{idx + 1}] : {domain} with IP: {ip}")
+
+        headers = {
+            "X-Auth-Email": email,
+            "X-Auth-Key": global_api_key,
+            "Content-Type": "application/json"
+        }
+        data = {
+            "type": "A",
+            "name": domain,
+            "content": ip,
+            "ttl": 60,
+            "proxied": False
+        }
+
+        url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+        response = requests.put(url, headers=headers, data=json.dumps(data))
+        res_domains.pop(domain, None)
+        print(response.json())
+    return res_domains
+
+def main():
+    fetch_ips()
+    print("中转节点下载完成，开始筛选...")
+    run_cloudflare_speedtest()
+
+    email, global_api_key, zone_id, domains = load_config()
+    domains = update_cloudflare_dns(email, global_api_key, zone_id, domains)
+    while domains:
+        print("未更新的域名: ", domains)
+        print("正在重新测速并更新...")
+        run_cloudflare_speedtest()
+        domains = update_cloudflare_dns(email, global_api_key, zone_id, domains)
+
+if __name__ == "__main__":
     main()
     print("10秒后自动退出程序")
     time.sleep(10)
